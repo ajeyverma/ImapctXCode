@@ -8,7 +8,9 @@ A starter Visual Studio Code extension.
 2. Press `F5` in VS Code to open an Extension Development Host.
 3. Select the ImpactXCode icon in the Activity Bar to open the extension's
    primary sidebar.
-4. Select **Run Hello World** in the sidebar, or run **ImpactXCode: Hello
+4. Expand your opened folder to browse and open its files, or expand
+   **Current** to find the welcome message and sample command.
+5. Select **Run Hello World** in the sidebar, or run **ImpactXCode: Hello
    World** from the Command Palette.
 
 The starter command is registered in `src/extension.ts`. Replace it with the
