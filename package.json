@@ -11,7 +11,6 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:impactxcode.helloWorld",
     "onView:impactxcode.main"
   ],
   "main": "./out/extension.js",
@@ -32,13 +31,7 @@
           "name": "Explorer"
         }
       ]
-    },
-    "commands": [
-      {
-        "command": "impactxcode.helloWorld",
-        "title": "ImpactXCode: Hello World"
-      }
-    ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
