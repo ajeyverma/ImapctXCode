@@ -11,10 +11,28 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:impactxcode.helloWorld"
+    "onCommand:impactxcode.helloWorld",
+    "onView:impactxcode.main"
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "impactxcode",
+          "title": "ImpactXCode",
+          "icon": "media/impactxcode.svg"
+        }
+      ]
+    },
+    "views": {
+      "impactxcode": [
+        {
+          "id": "impactxcode.main",
+          "name": "Welcome"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "impactxcode.helloWorld",
