@@ -1,0 +1,36 @@
+{
+  "name": "impactxcode-vscode-extension",
+  "displayName": "ImpactXCode",
+  "description": "A starter Visual Studio Code extension.",
+  "version": "0.0.1",
+  "publisher": "impactxcode",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:impactxcode.helloWorld"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "impactxcode.helloWorld",
+        "title": "ImpactXCode: Hello World"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "check-types": "tsc --noEmit -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.8.3"
+  }
+}
