@@ -50,7 +50,7 @@ class ExplorerViewProvider
 {
   private readonly changeEmitter = new vscode.EventEmitter<ExplorerItem | undefined>();
   private readonly currentItem = new ExplorerItem('Current', 'current', {
-    collapsibleState: vscode.TreeItemCollapsibleState.Collapsed,
+    collapsibleState: vscode.TreeItemCollapsibleState.Expanded,
   });
   private readonly aiSummaryItem = new ExplorerItem('AI Summary', 'aiSummary', {
     collapsibleState: vscode.TreeItemCollapsibleState.Collapsed,
@@ -78,6 +78,7 @@ class ExplorerViewProvider
 
   async getChildren(element?: ExplorerItem): Promise<ExplorerItem[]> {
     if (!element) {
+      this.updateCurrentLabel();
       const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
       const folderItems = workspaceFolders.map(
         (folder) =>
@@ -91,9 +92,12 @@ class ExplorerViewProvider
         folderItems.push(new ExplorerItem('No folder is open', 'message'));
       }
 
-      folderItems.push(this.currentItem, this.aiSummaryItem);
+      const defaultItems =
+        folderItems[0]?.kind === 'workspace'
+          ? [folderItems[0], this.currentItem, ...folderItems.slice(1), this.aiSummaryItem]
+          : [...folderItems, this.currentItem, this.aiSummaryItem];
       await this.orderLoaded;
-      return this.orderSections(folderItems);
+      return this.sectionOrder.length > 0 ? this.orderSections(defaultItems) : defaultItems;
     }
 
     if (element.kind === 'current') {
@@ -320,6 +324,11 @@ class ExplorerViewProvider
       const rightOrder = rightKey === undefined ? Number.MAX_SAFE_INTEGER : orderByKey.get(rightKey);
       return (leftOrder ?? Number.MAX_SAFE_INTEGER) - (rightOrder ?? Number.MAX_SAFE_INTEGER);
     });
+  }
+
+  private updateCurrentLabel(): void {
+    const fileName = vscode.window.activeTextEditor?.document.fileName.split(/[\\/]/).pop();
+    this.currentItem.label = fileName ? `${fileName} (Active)` : 'Current';
   }
 
   private async getCurrentChildren(): Promise<ExplorerItem[]> {
