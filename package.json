@@ -5,13 +5,14 @@
   "version": "0.0.1",
   "publisher": "impactxcode",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.90.0"
   },
   "categories": [
     "Other"
   ],
   "activationEvents": [
-    "onView:impactxcode.main"
+    "onView:impactxcode.main",
+    "onCommand:impactxcode.generateAiSummary"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -31,7 +32,13 @@
           "name": "Explorer"
         }
       ]
-    }
+    },
+    "commands": [
+      {
+        "command": "impactxcode.generateAiSummary",
+        "title": "ImpactXCode: Generate AI Summary"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -41,7 +48,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.15.30",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.90.0",
     "typescript": "^5.8.3"
   }
 }

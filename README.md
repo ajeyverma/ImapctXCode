@@ -10,8 +10,14 @@ A starter Visual Studio Code extension.
    primary sidebar.
 4. Expand your opened folder to browse and open its files, or expand
    **Current** to see functions and methods from the active file.
-5. Drag the folder and **Current** section headers to reorder them; the order
-   is saved for the workspace.
+5. Expand **AI Summary** and select **Generate AI Summary**. Choose an available
+   language model when prompted. VS Code may ask you to grant model access.
+   The summary is cleared when you switch or edit the active file.
+6. Drag the folder, **Current**, and **AI Summary** section headers to reorder
+   them; the order is saved for the workspace.
+
+The summary sends the active file's contents to the language model you select
+through VS Code's Language Model API.
 
 ## Build
 
