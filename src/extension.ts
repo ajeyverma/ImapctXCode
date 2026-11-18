@@ -108,6 +108,10 @@ class ExplorerViewProvider
       return [];
     }
 
+    if (element.kind === 'file' && element.resourceUri) {
+      return this.getFileFunctions(element.resourceUri);
+    }
+
     if ((element.kind === 'workspace' || element.kind === 'directory') && element.resourceUri) {
       return this.getDirectoryChildren(element.resourceUri);
     }
@@ -324,48 +328,59 @@ class ExplorerViewProvider
       return [new ExplorerItem('Open a file to see its functions', 'message')];
     }
 
-    const document = editor.document;
     try {
-      const symbols = await vscode.commands.executeCommand<
-        (vscode.DocumentSymbol | vscode.SymbolInformation)[] | undefined
-      >('vscode.executeDocumentSymbolProvider', document.uri);
-      const functionItems: ExplorerItem[] = [];
-
-      const addDocumentSymbol = (symbol: vscode.DocumentSymbol, container?: string): void => {
-        const name = container ? `${container}.${symbol.name}` : symbol.name;
-        if (functionSymbolKinds.has(symbol.kind)) {
-          functionItems.push(
-            this.createFunctionItem(name, symbol.kind, document.uri, symbol.selectionRange),
-          );
-        }
-        for (const child of symbol.children) {
-          addDocumentSymbol(child, name);
-        }
-      };
-
-      for (const symbol of symbols ?? []) {
-        if ('children' in symbol) {
-          addDocumentSymbol(symbol);
-        } else if (functionSymbolKinds.has(symbol.kind)) {
-          const name = symbol.containerName
-            ? `${symbol.containerName}.${symbol.name}`
-            : symbol.name;
-          functionItems.push(
-            this.createFunctionItem(name, symbol.kind, symbol.location.uri, symbol.location.range),
-          );
-        }
-      }
-
-      if (functionItems.length === 0) {
-        functionItems.push(new ExplorerItem('No functions found in this file', 'message'));
-      }
-
-      return functionItems;
+      return await this.getFunctionsForDocument(editor.document);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`Unable to load symbols for "${document.uri.toString()}": ${message}`);
+      console.error(`Unable to load symbols for "${editor.document.uri.toString()}": ${message}`);
       return [new ExplorerItem('Unable to load functions', 'message', { description: message })];
     }
+  }
+
+  private async getFileFunctions(uri: vscode.Uri): Promise<ExplorerItem[]> {
+    try {
+      const document = await vscode.workspace.openTextDocument(uri);
+      return this.getFunctionsForDocument(document);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Unable to load symbols for "${uri.toString()}": ${message}`);
+      return [new ExplorerItem('Unable to load functions', 'message', { description: message })];
+    }
+  }
+
+  private async getFunctionsForDocument(document: vscode.TextDocument): Promise<ExplorerItem[]> {
+    const symbols = await vscode.commands.executeCommand<
+      (vscode.DocumentSymbol | vscode.SymbolInformation)[] | undefined
+    >('vscode.executeDocumentSymbolProvider', document.uri);
+    const functionItems: ExplorerItem[] = [];
+
+    const addDocumentSymbol = (symbol: vscode.DocumentSymbol, container?: string): void => {
+      const name = container ? `${container}.${symbol.name}` : symbol.name;
+      if (functionSymbolKinds.has(symbol.kind)) {
+        functionItems.push(
+          this.createFunctionItem(name, symbol.kind, document.uri, symbol.selectionRange),
+        );
+      }
+      for (const child of symbol.children) {
+        addDocumentSymbol(child, name);
+      }
+    };
+
+    for (const symbol of symbols ?? []) {
+      if ('children' in symbol) {
+        addDocumentSymbol(symbol);
+      } else if (functionSymbolKinds.has(symbol.kind)) {
+        const name = symbol.containerName ? `${symbol.containerName}.${symbol.name}` : symbol.name;
+        functionItems.push(
+          this.createFunctionItem(name, symbol.kind, symbol.location.uri, symbol.location.range),
+        );
+      }
+    }
+
+    if (functionItems.length === 0) {
+      functionItems.push(new ExplorerItem('No functions found in this file', 'message'));
+    }
+    return functionItems;
   }
 
   private getAiSummaryChildren(): ExplorerItem[] {
@@ -488,9 +503,7 @@ class ExplorerViewProvider
         const childUri = vscode.Uri.joinPath(uri, name);
         const isDirectory = (type & vscode.FileType.Directory) !== 0;
         return new ExplorerItem(name, isDirectory ? 'directory' : 'file', {
-          collapsibleState: isDirectory
-            ? vscode.TreeItemCollapsibleState.Collapsed
-            : vscode.TreeItemCollapsibleState.None,
+          collapsibleState: vscode.TreeItemCollapsibleState.Collapsed,
           resourceUri: childUri,
           command: isDirectory
             ? undefined

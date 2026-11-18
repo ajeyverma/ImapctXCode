@@ -8,8 +8,9 @@ A starter Visual Studio Code extension.
 2. Press `F5` in VS Code to open an Extension Development Host.
 3. Select the ImpactXCode icon in the Activity Bar to open the extension's
    primary sidebar.
-4. Expand your opened folder to browse and open its files, or expand
-   **Current** to see functions and methods from the active file.
+4. Expand your opened folder to browse files. Expand a file to see its
+   functions and methods; select a function to jump to it. Expand **Current**
+   to see functions and methods from the active file.
 5. Expand **AI Summary** and select **Generate AI Summary**. Choose an available
    language model when prompted. VS Code may ask you to grant model access.
    The summary is cleared when you switch or edit the active file.
