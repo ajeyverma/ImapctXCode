@@ -43,6 +43,50 @@ const functionSymbolKinds = new Set<vscode.SymbolKind>([
   vscode.SymbolKind.Operator,
 ]);
 
+interface FunctionSymbol {
+  name: string;
+  kind: vscode.SymbolKind;
+  uri: vscode.Uri;
+  range: vscode.Range;
+}
+
+function collectFunctionSymbols(
+  symbols: (vscode.DocumentSymbol | vscode.SymbolInformation)[],
+  documentUri: vscode.Uri,
+): FunctionSymbol[] {
+  const functions: FunctionSymbol[] = [];
+
+  const addDocumentSymbol = (symbol: vscode.DocumentSymbol, container?: string): void => {
+    const name = container ? `${container}.${symbol.name}` : symbol.name;
+    if (functionSymbolKinds.has(symbol.kind)) {
+      functions.push({
+        name,
+        kind: symbol.kind,
+        uri: documentUri,
+        range: symbol.selectionRange,
+      });
+    }
+    for (const child of symbol.children) {
+      addDocumentSymbol(child, name);
+    }
+  };
+
+  for (const symbol of symbols) {
+    if ('children' in symbol) {
+      addDocumentSymbol(symbol);
+    } else if (functionSymbolKinds.has(symbol.kind)) {
+      functions.push({
+        name: symbol.containerName ? `${symbol.containerName}.${symbol.name}` : symbol.name,
+        kind: symbol.kind,
+        uri: symbol.location.uri,
+        range: symbol.location.range,
+      });
+    }
+  }
+
+  return functions;
+}
+
 class ExplorerViewProvider
   implements
     vscode.TreeDataProvider<ExplorerItem>,
@@ -361,30 +405,9 @@ class ExplorerViewProvider
     const symbols = await vscode.commands.executeCommand<
       (vscode.DocumentSymbol | vscode.SymbolInformation)[] | undefined
     >('vscode.executeDocumentSymbolProvider', document.uri);
-    const functionItems: ExplorerItem[] = [];
-
-    const addDocumentSymbol = (symbol: vscode.DocumentSymbol, container?: string): void => {
-      const name = container ? `${container}.${symbol.name}` : symbol.name;
-      if (functionSymbolKinds.has(symbol.kind)) {
-        functionItems.push(
-          this.createFunctionItem(name, symbol.kind, document.uri, symbol.selectionRange),
-        );
-      }
-      for (const child of symbol.children) {
-        addDocumentSymbol(child, name);
-      }
-    };
-
-    for (const symbol of symbols ?? []) {
-      if ('children' in symbol) {
-        addDocumentSymbol(symbol);
-      } else if (functionSymbolKinds.has(symbol.kind)) {
-        const name = symbol.containerName ? `${symbol.containerName}.${symbol.name}` : symbol.name;
-        functionItems.push(
-          this.createFunctionItem(name, symbol.kind, symbol.location.uri, symbol.location.range),
-        );
-      }
-    }
+    const functionItems = collectFunctionSymbols(symbols ?? [], document.uri).map((symbol) =>
+      this.createFunctionItem(symbol.name, symbol.kind, symbol.uri, symbol.range),
+    );
 
     if (functionItems.length === 0) {
       functionItems.push(new ExplorerItem('No functions found in this file', 'message'));
@@ -533,6 +556,62 @@ class ExplorerViewProvider
 
 export function activate(context: vscode.ExtensionContext): void {
   const explorerProvider = new ExplorerViewProvider(context.workspaceState);
+  const functionCountStatus = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left,
+    100,
+  );
+  let functionCountRequest = 0;
+  let functionCountTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const updateFunctionCount = async (): Promise<void> => {
+    const document = vscode.window.activeTextEditor?.document;
+    const request = ++functionCountRequest;
+    if (!document) {
+      functionCountStatus.hide();
+      return;
+    }
+
+    functionCountStatus.text = '$(symbol-function) …';
+    functionCountStatus.tooltip = `Counting functions in ${document.fileName}`;
+    functionCountStatus.show();
+
+    try {
+      const symbols = await vscode.commands.executeCommand<
+        (vscode.DocumentSymbol | vscode.SymbolInformation)[] | undefined
+      >('vscode.executeDocumentSymbolProvider', document.uri);
+      if (
+        request !== functionCountRequest ||
+        vscode.window.activeTextEditor?.document !== document ||
+        document.version !== vscode.window.activeTextEditor.document.version
+      ) {
+        return;
+      }
+
+      const count = collectFunctionSymbols(symbols ?? [], document.uri).length;
+      functionCountStatus.text = `$(symbol-function) ${count} ${count === 1 ? 'function' : 'functions'}`;
+      functionCountStatus.tooltip = `${count} ${
+        count === 1 ? 'function' : 'functions'
+      } in ${document.fileName}`;
+    } catch (error) {
+      if (request === functionCountRequest) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Unable to count functions in "${document.uri.toString()}": ${message}`);
+        functionCountStatus.text = '$(warning) Function count unavailable';
+        functionCountStatus.tooltip = message;
+      }
+    }
+  };
+
+  const scheduleFunctionCountUpdate = (): void => {
+    if (functionCountTimer) {
+      clearTimeout(functionCountTimer);
+    }
+    functionCountTimer = setTimeout(() => {
+      functionCountTimer = undefined;
+      void updateFunctionCount();
+    }, 300);
+  };
+
   const welcomeView = vscode.window.createTreeView(
     'impactxcode.main',
     {
@@ -545,10 +624,12 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   const activeEditorChanged = vscode.window.onDidChangeActiveTextEditor(() => {
     explorerProvider.resetActiveFileState();
+    void updateFunctionCount();
   });
   const activeDocumentChanged = vscode.workspace.onDidChangeTextDocument((event) => {
     if (event.document === vscode.window.activeTextEditor?.document) {
       explorerProvider.resetActiveFileState();
+      scheduleFunctionCountUpdate();
     }
   });
   const generateAiSummary = vscode.commands.registerCommand(
@@ -562,7 +643,10 @@ export function activate(context: vscode.ExtensionContext): void {
     activeEditorChanged,
     activeDocumentChanged,
     generateAiSummary,
+    functionCountStatus,
+    { dispose: () => functionCountTimer && clearTimeout(functionCountTimer) },
   );
+  void updateFunctionCount();
 }
 
 export function deactivate(): void {}
