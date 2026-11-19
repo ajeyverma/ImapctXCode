@@ -17,8 +17,10 @@ A starter Visual Studio Code extension.
 5. Expand **AI Summary** and select **Generate AI Summary**. Choose an available
    language model when prompted. VS Code may ask you to grant model access.
    The summary is cleared when you switch or edit the active file.
-6. Drag the folder, **Current**, and **AI Summary** section headers to reorder
-   them; the order is saved for the workspace.
+6. Expand **Graph** to explore the active file's outgoing function calls and
+   the files that reference the function under the cursor.
+7. Drag the folder, **Current**, **AI Summary**, and **Graph** section headers
+   to reorder them; the order is saved for the workspace.
 
 The summary sends the active file's contents to the language model you select
 through VS Code's Language Model API.

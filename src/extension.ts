@@ -6,6 +6,11 @@ type ExplorerItemKind =
   | 'file'
   | 'current'
   | 'aiSummary'
+  | 'graph'
+  | 'callGraph'
+  | 'impactGraph'
+  | 'callNode'
+  | 'referenceNode'
   | 'summaryText'
   | 'summaryAction'
   | 'function'
@@ -27,13 +32,20 @@ class ExplorerItem extends vscode.TreeItem {
       description?: string;
       resourceUri?: vscode.Uri;
       command?: vscode.Command;
+      callHierarchyItem?: vscode.CallHierarchyItem;
+      callHierarchyPath?: string[];
     } = {},
   ) {
     super(label, options.collapsibleState ?? vscode.TreeItemCollapsibleState.None);
     this.description = options.description;
     this.resourceUri = options.resourceUri;
     this.command = options.command;
+    this.callHierarchyItem = options.callHierarchyItem;
+    this.callHierarchyPath = options.callHierarchyPath;
   }
+
+  readonly callHierarchyItem?: vscode.CallHierarchyItem;
+  readonly callHierarchyPath?: string[];
 }
 
 const functionSymbolKinds = new Set<vscode.SymbolKind>([
@@ -91,6 +103,11 @@ function collectFunctionSymbols(
 }
 
 async function countImpactFiles(symbol: FunctionSymbol): Promise<number> {
+  const locations = await getImpactReferences(symbol);
+  return new Set(locations.map((location) => location.uri.toString())).size;
+}
+
+async function getImpactReferences(symbol: FunctionSymbol): Promise<vscode.Location[]> {
   const locations = await vscode.commands.executeCommand<vscode.Location[] | undefined>(
     'vscode.executeReferenceProvider',
     symbol.uri,
@@ -101,19 +118,13 @@ async function countImpactFiles(symbol: FunctionSymbol): Promise<number> {
     throw new Error('No reference provider is available for this function.');
   }
 
-  const files = new Set(
-    locations
-      .filter(
-        (location) =>
-          !(
-            location.uri.toString() === symbol.uri.toString() &&
-            location.range.start.line === symbol.range.start.line &&
-            location.range.start.character === symbol.range.start.character
-          ),
-      )
-      .map((location) => location.uri.toString()),
+  return locations.filter(
+    (location) =>
+      !(
+        location.uri.toString() === symbol.uri.toString() &&
+        symbol.fullRange.contains(location.range.start)
+      ),
   );
-  return files.size;
 }
 
 class ExplorerViewProvider
@@ -126,6 +137,15 @@ class ExplorerViewProvider
     collapsibleState: vscode.TreeItemCollapsibleState.Expanded,
   });
   private readonly aiSummaryItem = new ExplorerItem('AI Summary', 'aiSummary', {
+    collapsibleState: vscode.TreeItemCollapsibleState.Collapsed,
+  });
+  private readonly graphItem = new ExplorerItem('Graph', 'graph', {
+    collapsibleState: vscode.TreeItemCollapsibleState.Collapsed,
+  });
+  private readonly callGraphItem = new ExplorerItem('Active File Calls', 'callGraph', {
+    collapsibleState: vscode.TreeItemCollapsibleState.Collapsed,
+  });
+  private readonly impactGraphItem = new ExplorerItem('Function Impact', 'impactGraph', {
     collapsibleState: vscode.TreeItemCollapsibleState.Collapsed,
   });
   private sectionOrder: string[] = [];
@@ -170,8 +190,14 @@ class ExplorerViewProvider
 
       const defaultItems =
         folderItems[0]?.kind === 'workspace'
-          ? [folderItems[0], this.currentItem, ...folderItems.slice(1), this.aiSummaryItem]
-          : [...folderItems, this.currentItem, this.aiSummaryItem];
+          ? [
+              folderItems[0],
+              this.currentItem,
+              ...folderItems.slice(1),
+              this.aiSummaryItem,
+              this.graphItem,
+            ]
+          : [...folderItems, this.currentItem, this.aiSummaryItem, this.graphItem];
       await this.orderLoaded;
       return this.sectionOrder.length > 0 ? this.orderSections(defaultItems) : defaultItems;
     }
@@ -182,6 +208,22 @@ class ExplorerViewProvider
 
     if (element.kind === 'aiSummary') {
       return this.getAiSummaryChildren();
+    }
+
+    if (element.kind === 'graph') {
+      return [this.callGraphItem, this.impactGraphItem];
+    }
+
+    if (element.kind === 'callGraph') {
+      return this.getCallGraphChildren();
+    }
+
+    if (element.kind === 'impactGraph') {
+      return this.getImpactGraphChildren();
+    }
+
+    if (element.kind === 'callNode' && element.callHierarchyItem) {
+      return this.getOutgoingCallChildren(element);
     }
 
     if (element.kind === 'function') {
@@ -209,6 +251,15 @@ class ExplorerViewProvider
 
   refreshAiSummary(): void {
     this.changeEmitter.fire(this.aiSummaryItem);
+  }
+
+  refreshGraph(): void {
+    this.changeEmitter.fire(this.callGraphItem);
+    this.changeEmitter.fire(this.impactGraphItem);
+  }
+
+  refreshImpactGraph(): void {
+    this.changeEmitter.fire(this.impactGraphItem);
   }
 
   invalidateImpactCounts(): void {
@@ -390,7 +441,7 @@ class ExplorerViewProvider
           resourceUri: folder.uri,
         }),
     );
-    return [...folders, this.currentItem, this.aiSummaryItem];
+    return [...folders, this.currentItem, this.aiSummaryItem, this.graphItem];
   }
 
   private getSectionKey(item: ExplorerItem): string | undefined {
@@ -399,6 +450,9 @@ class ExplorerViewProvider
     }
     if (item.kind === 'aiSummary') {
       return 'aiSummary';
+    }
+    if (item.kind === 'graph') {
+      return 'graph';
     }
     if (item.kind === 'workspace' && item.resourceUri) {
       return item.resourceUri.toString();
@@ -434,6 +488,187 @@ class ExplorerViewProvider
       const message = error instanceof Error ? error.message : String(error);
       console.error(`Unable to load symbols for "${editor.document.uri.toString()}": ${message}`);
       return [new ExplorerItem('Unable to load functions', 'message', { description: message })];
+    }
+  }
+
+  private async getCallGraphChildren(): Promise<ExplorerItem[]> {
+    const document = vscode.window.activeTextEditor?.document;
+    if (!document) {
+      return [new ExplorerItem('Open a file to view its call graph', 'message')];
+    }
+
+    try {
+      const symbols = await vscode.commands.executeCommand<
+        (vscode.DocumentSymbol | vscode.SymbolInformation)[] | undefined
+      >('vscode.executeDocumentSymbolProvider', document.uri);
+      const functions = collectFunctionSymbols(symbols ?? [], document.uri);
+      if (functions.length === 0) {
+        return [new ExplorerItem('No functions found in the active file', 'message')];
+      }
+
+      const nodes = await Promise.all(
+        functions.map(async (symbol) => {
+          const prepared = await vscode.commands.executeCommand<
+            vscode.CallHierarchyItem | vscode.CallHierarchyItem[] | undefined
+          >('vscode.prepareCallHierarchy', document.uri, symbol.range.start);
+          const hierarchyItems = Array.isArray(prepared)
+            ? prepared
+            : prepared
+              ? [prepared]
+              : [];
+          const hierarchyItem =
+            hierarchyItems.find(
+              (item) =>
+                item.uri.toString() === symbol.uri.toString() &&
+                item.range.contains(symbol.range.start),
+            ) ?? hierarchyItems[0];
+          return hierarchyItem
+            ? this.createCallNode(hierarchyItem, [])
+            : undefined;
+        }),
+      );
+      const availableNodes = nodes.filter((node): node is ExplorerItem => node !== undefined);
+      return availableNodes.length > 0
+        ? availableNodes
+        : [new ExplorerItem('No call hierarchy provider is available for this file', 'message')];
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Unable to build call graph for "${document.uri.toString()}": ${message}`);
+      return [new ExplorerItem('Unable to build call graph', 'message', { description: message })];
+    }
+  }
+
+  private async getOutgoingCallChildren(element: ExplorerItem): Promise<ExplorerItem[]> {
+    const item = element.callHierarchyItem;
+    if (!item) {
+      return [];
+    }
+
+    try {
+      const outgoingCalls = await vscode.commands.executeCommand<
+        vscode.CallHierarchyOutgoingCall[] | undefined
+      >('vscode.provideOutgoingCalls', item);
+      if (!outgoingCalls) {
+        return [new ExplorerItem('No call hierarchy provider is available', 'message')];
+      }
+      if (outgoingCalls.length === 0) {
+        return [new ExplorerItem('No outgoing calls', 'message')];
+      }
+
+      return outgoingCalls.map((call) => {
+        const key = this.getCallHierarchyKey(call.to);
+        const isRecursive = element.callHierarchyPath?.includes(key) ?? false;
+        const callNode = this.createCallNode(
+          call.to,
+          [...(element.callHierarchyPath ?? []), key],
+          call.fromRanges.length,
+          isRecursive,
+        );
+        return callNode;
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Unable to read outgoing calls for "${item.name}": ${message}`);
+      return [new ExplorerItem('Unable to load outgoing calls', 'message', { description: message })];
+    }
+  }
+
+  private createCallNode(
+    item: vscode.CallHierarchyItem,
+    path: string[],
+    callSiteCount?: number,
+    recursive = false,
+  ): ExplorerItem {
+    const description = recursive
+      ? 'Recursive call'
+      : callSiteCount === undefined
+        ? vscode.workspace.asRelativePath(item.uri)
+        : `${callSiteCount} call ${callSiteCount === 1 ? 'site' : 'sites'}`;
+    return new ExplorerItem(item.name, 'callNode', {
+      collapsibleState: recursive
+        ? vscode.TreeItemCollapsibleState.None
+        : vscode.TreeItemCollapsibleState.Collapsed,
+      description,
+      command: {
+        command: 'vscode.open',
+        title: 'Go to Function',
+        arguments: [item.uri, { selection: item.selectionRange }],
+      },
+      callHierarchyItem: item,
+      callHierarchyPath: path,
+    });
+  }
+
+  private getCallHierarchyKey(item: vscode.CallHierarchyItem): string {
+    return `${item.uri.toString()}:${item.selectionRange.start.line}:${item.selectionRange.start.character}`;
+  }
+
+  private async getImpactGraphChildren(): Promise<ExplorerItem[]> {
+    this.impactGraphItem.description = undefined;
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      return [new ExplorerItem('Open a file and place the cursor in a function', 'message')];
+    }
+
+    try {
+      const symbols = await vscode.commands.executeCommand<
+        (vscode.DocumentSymbol | vscode.SymbolInformation)[] | undefined
+      >('vscode.executeDocumentSymbolProvider', editor.document.uri);
+      const cursor = editor.selection.active;
+      const symbol = collectFunctionSymbols(symbols ?? [], editor.document.uri)
+        .filter((candidate) => candidate.fullRange.contains(cursor))
+        .sort(
+          (left, right) =>
+            editor.document.offsetAt(left.fullRange.end) -
+              editor.document.offsetAt(left.fullRange.start) -
+            (editor.document.offsetAt(right.fullRange.end) -
+              editor.document.offsetAt(right.fullRange.start)),
+        )[0];
+
+      if (!symbol) {
+        return [new ExplorerItem('Place the cursor inside a function', 'message')];
+      }
+
+      this.impactGraphItem.description = symbol.name;
+      const locations = await getImpactReferences(symbol);
+      if (locations.length === 0) {
+        return [new ExplorerItem('No references found in other files', 'message')];
+      }
+
+      const files = new Map<string, vscode.Location[]>();
+      for (const location of locations) {
+        const key = location.uri.toString();
+        const entries = files.get(key) ?? [];
+        entries.push(location);
+        files.set(key, entries);
+      }
+
+      return [...files.entries()]
+        .map(([uri, fileLocations]) => {
+          const firstLocation = fileLocations[0];
+          const item = new ExplorerItem(
+            vscode.workspace.asRelativePath(firstLocation.uri),
+            'referenceNode',
+            {
+              description: `${fileLocations.length} ${
+                fileLocations.length === 1 ? 'reference' : 'references'
+              }`,
+              resourceUri: firstLocation.uri,
+              command: {
+                command: 'vscode.open',
+                title: 'Open Reference',
+                arguments: [firstLocation.uri, { selection: firstLocation.range }],
+              },
+            },
+          );
+          return { item, label: vscode.workspace.asRelativePath(firstLocation.uri) };
+        })
+        .sort((left, right) => left.label.localeCompare(right.label))
+        .map(({ item }) => item);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Unable to build function impact graph: ${message}`);
+      return [new ExplorerItem('Unable to build function impact graph', 'message', { description: message })];
     }
   }
 
@@ -797,17 +1032,21 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   const workspaceFoldersChanged = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     explorerProvider.refresh();
+    explorerProvider.refreshGraph();
   });
   const activeEditorChanged = vscode.window.onDidChangeActiveTextEditor(() => {
     explorerProvider.resetActiveFileState();
+    explorerProvider.refreshGraph();
     void updateFunctionCount();
     void updateImpactCount();
   });
   const cursorChanged = vscode.window.onDidChangeTextEditorSelection(() => {
     scheduleImpactCountUpdate();
+    explorerProvider.refreshImpactGraph();
   });
   const activeDocumentChanged = vscode.workspace.onDidChangeTextDocument((event) => {
     explorerProvider.invalidateImpactCounts();
+    explorerProvider.refreshGraph();
     impactCountCache.clear();
     if (event.document === vscode.window.activeTextEditor?.document) {
       explorerProvider.resetActiveFileState();
