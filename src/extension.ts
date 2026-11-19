@@ -48,6 +48,7 @@ interface FunctionSymbol {
   kind: vscode.SymbolKind;
   uri: vscode.Uri;
   range: vscode.Range;
+  fullRange: vscode.Range;
 }
 
 function collectFunctionSymbols(
@@ -64,6 +65,7 @@ function collectFunctionSymbols(
         kind: symbol.kind,
         uri: documentUri,
         range: symbol.selectionRange,
+        fullRange: symbol.range,
       });
     }
     for (const child of symbol.children) {
@@ -80,11 +82,38 @@ function collectFunctionSymbols(
         kind: symbol.kind,
         uri: symbol.location.uri,
         range: symbol.location.range,
+        fullRange: symbol.location.range,
       });
     }
   }
 
   return functions;
+}
+
+async function countImpactFiles(symbol: FunctionSymbol): Promise<number> {
+  const locations = await vscode.commands.executeCommand<vscode.Location[] | undefined>(
+    'vscode.executeReferenceProvider',
+    symbol.uri,
+    symbol.range.start,
+    { includeDeclaration: false },
+  );
+  if (!locations) {
+    throw new Error('No reference provider is available for this function.');
+  }
+
+  const files = new Set(
+    locations
+      .filter(
+        (location) =>
+          !(
+            location.uri.toString() === symbol.uri.toString() &&
+            location.range.start.line === symbol.range.start.line &&
+            location.range.start.character === symbol.range.start.character
+          ),
+      )
+      .map((location) => location.uri.toString()),
+  );
+  return files.size;
 }
 
 class ExplorerViewProvider
@@ -104,6 +133,9 @@ class ExplorerViewProvider
   private summary: FileSummary | undefined;
   private summaryError: string | undefined;
   private summaryCancellation: vscode.CancellationTokenSource | undefined;
+  private readonly impactCountRequests = new Map<string, Promise<number>>();
+  private impactGeneration = 0;
+  private impactRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   readonly dragMimeTypes = [sectionMimeType];
   readonly dropMimeTypes = [sectionMimeType];
   readonly onDidChangeTreeData = this.changeEmitter.event;
@@ -177,6 +209,18 @@ class ExplorerViewProvider
 
   refreshAiSummary(): void {
     this.changeEmitter.fire(this.aiSummaryItem);
+  }
+
+  invalidateImpactCounts(): void {
+    this.impactGeneration += 1;
+    this.impactCountRequests.clear();
+    if (this.impactRefreshTimer) {
+      clearTimeout(this.impactRefreshTimer);
+    }
+    this.impactRefreshTimer = setTimeout(() => {
+      this.impactRefreshTimer = undefined;
+      this.refresh();
+    }, 300);
   }
 
   resetActiveFileState(): void {
@@ -332,6 +376,9 @@ class ExplorerViewProvider
   dispose(): void {
     this.summaryCancellation?.cancel();
     this.summaryCancellation?.dispose();
+    if (this.impactRefreshTimer) {
+      clearTimeout(this.impactRefreshTimer);
+    }
     this.changeEmitter.dispose();
   }
 
@@ -406,7 +453,7 @@ class ExplorerViewProvider
       (vscode.DocumentSymbol | vscode.SymbolInformation)[] | undefined
     >('vscode.executeDocumentSymbolProvider', document.uri);
     const functionItems = collectFunctionSymbols(symbols ?? [], document.uri).map((symbol) =>
-      this.createFunctionItem(symbol.name, symbol.kind, symbol.uri, symbol.range),
+      this.createFunctionItem(symbol),
     );
 
     if (functionItems.length === 0) {
@@ -486,22 +533,57 @@ class ExplorerViewProvider
     return prompt;
   }
 
-  private createFunctionItem(
-    name: string,
-    kind: vscode.SymbolKind,
-    uri: vscode.Uri,
-    range: vscode.Range,
-  ): ExplorerItem {
-    const item = new ExplorerItem(name, 'function', {
-      description: `Line ${range.start.line + 1}`,
+  private createFunctionItem(symbol: FunctionSymbol): ExplorerItem {
+    const item = new ExplorerItem(symbol.name, 'function', {
+      description: `Line ${symbol.range.start.line + 1} · Impact: checking…`,
       command: {
         command: 'vscode.open',
         title: 'Go to Function',
-        arguments: [uri, { selection: range }],
+        arguments: [symbol.uri, { selection: symbol.range }],
       },
     });
-    item.iconPath = new vscode.ThemeIcon(this.getSymbolIcon(kind));
+    item.iconPath = new vscode.ThemeIcon(this.getSymbolIcon(symbol.kind));
+    void this.updateImpactCount(item, symbol);
     return item;
+  }
+
+  private async updateImpactCount(
+    item: ExplorerItem,
+    symbol: FunctionSymbol,
+  ): Promise<void> {
+    const generation = this.impactGeneration;
+    const key = `${symbol.uri.toString()}:${symbol.range.start.line}:${symbol.range.start.character}`;
+    let request = this.impactCountRequests.get(key);
+    if (!request) {
+      request = countImpactFiles(symbol);
+      this.impactCountRequests.set(key, request);
+    }
+
+    try {
+      const count = await request;
+      if (generation !== this.impactGeneration) {
+        return;
+      }
+      item.description = `Line ${symbol.range.start.line + 1} · Impact: ${count} ${
+        count === 1 ? 'file' : 'files'
+      }`;
+      item.tooltip = `${symbol.name} is referenced in ${count} ${
+        count === 1 ? 'file' : 'files'
+      }`;
+      this.changeEmitter.fire(item);
+    } catch (error) {
+      if (generation !== this.impactGeneration) {
+        return;
+      }
+      if (this.impactCountRequests.get(key) === request) {
+        this.impactCountRequests.delete(key);
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Unable to count impact for "${symbol.name}": ${message}`);
+      item.description = `Line ${symbol.range.start.line + 1} · Impact unavailable`;
+      item.tooltip = message;
+      this.changeEmitter.fire(item);
+    }
   }
 
   private getSymbolIcon(kind: vscode.SymbolKind): string {
@@ -560,8 +642,15 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.StatusBarAlignment.Left,
     100,
   );
+  const impactCountStatus = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left,
+    90,
+  );
   let functionCountRequest = 0;
+  let impactCountRequest = 0;
   let functionCountTimer: ReturnType<typeof setTimeout> | undefined;
+  let impactCountTimer: ReturnType<typeof setTimeout> | undefined;
+  const impactCountCache = new Map<string, Promise<number>>();
 
   const updateFunctionCount = async (): Promise<void> => {
     const document = vscode.window.activeTextEditor?.document;
@@ -612,6 +701,93 @@ export function activate(context: vscode.ExtensionContext): void {
     }, 300);
   };
 
+  const updateImpactCount = async (): Promise<void> => {
+    const editor = vscode.window.activeTextEditor;
+    const request = ++impactCountRequest;
+    if (!editor) {
+      impactCountStatus.hide();
+      return;
+    }
+
+    const { document, selection } = editor;
+    const documentVersion = document.version;
+    impactCountStatus.text = '$(references) Impact: …';
+    impactCountStatus.tooltip = 'Finding the function at the cursor';
+    impactCountStatus.show();
+
+    try {
+      const symbols = await vscode.commands.executeCommand<
+        (vscode.DocumentSymbol | vscode.SymbolInformation)[] | undefined
+      >('vscode.executeDocumentSymbolProvider', document.uri);
+      if (
+        request !== impactCountRequest ||
+        vscode.window.activeTextEditor?.document !== document ||
+        document.version !== documentVersion ||
+        !vscode.window.activeTextEditor.selection.active.isEqual(selection.active)
+      ) {
+        return;
+      }
+
+      const cursor = selection.active;
+      const symbol = collectFunctionSymbols(symbols ?? [], document.uri)
+        .filter((candidate) => candidate.fullRange.contains(cursor))
+        .sort(
+          (left, right) =>
+            document.offsetAt(left.fullRange.end) -
+              document.offsetAt(left.fullRange.start) -
+            (document.offsetAt(right.fullRange.end) -
+              document.offsetAt(right.fullRange.start)),
+        )[0];
+
+      if (!symbol) {
+        impactCountStatus.hide();
+        return;
+      }
+
+      const key = `${symbol.uri.toString()}:${symbol.range.start.line}:${symbol.range.start.character}`;
+      let countRequest = impactCountCache.get(key);
+      if (!countRequest) {
+        countRequest = countImpactFiles(symbol).catch((error: unknown) => {
+          impactCountCache.delete(key);
+          throw error;
+        });
+        impactCountCache.set(key, countRequest);
+      }
+      const count = await countRequest;
+      if (
+        request !== impactCountRequest ||
+        vscode.window.activeTextEditor?.document !== document ||
+        document.version !== documentVersion ||
+        !vscode.window.activeTextEditor.selection.active.isEqual(selection.active)
+      ) {
+        return;
+      }
+
+      impactCountStatus.text = `$(references) Impact: ${count} ${count === 1 ? 'file' : 'files'}`;
+      impactCountStatus.tooltip = `${symbol.name} is referenced in ${count} ${
+        count === 1 ? 'file' : 'files'
+      }`;
+    } catch (error) {
+      if (request === impactCountRequest) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Unable to count function impact at cursor: ${message}`);
+        impactCountStatus.text = '$(warning) Impact unavailable';
+        impactCountStatus.tooltip = message;
+      }
+    }
+  };
+
+  const scheduleImpactCountUpdate = (): void => {
+    impactCountRequest += 1;
+    if (impactCountTimer) {
+      clearTimeout(impactCountTimer);
+    }
+    impactCountTimer = setTimeout(() => {
+      impactCountTimer = undefined;
+      void updateImpactCount();
+    }, 250);
+  };
+
   const welcomeView = vscode.window.createTreeView(
     'impactxcode.main',
     {
@@ -625,11 +801,18 @@ export function activate(context: vscode.ExtensionContext): void {
   const activeEditorChanged = vscode.window.onDidChangeActiveTextEditor(() => {
     explorerProvider.resetActiveFileState();
     void updateFunctionCount();
+    void updateImpactCount();
+  });
+  const cursorChanged = vscode.window.onDidChangeTextEditorSelection(() => {
+    scheduleImpactCountUpdate();
   });
   const activeDocumentChanged = vscode.workspace.onDidChangeTextDocument((event) => {
+    explorerProvider.invalidateImpactCounts();
+    impactCountCache.clear();
     if (event.document === vscode.window.activeTextEditor?.document) {
       explorerProvider.resetActiveFileState();
       scheduleFunctionCountUpdate();
+      scheduleImpactCountUpdate();
     }
   });
   const generateAiSummary = vscode.commands.registerCommand(
@@ -641,12 +824,24 @@ export function activate(context: vscode.ExtensionContext): void {
     welcomeView,
     workspaceFoldersChanged,
     activeEditorChanged,
+    cursorChanged,
     activeDocumentChanged,
     generateAiSummary,
     functionCountStatus,
-    { dispose: () => functionCountTimer && clearTimeout(functionCountTimer) },
+    impactCountStatus,
+    {
+      dispose: () => {
+        if (functionCountTimer) {
+          clearTimeout(functionCountTimer);
+        }
+        if (impactCountTimer) {
+          clearTimeout(impactCountTimer);
+        }
+      },
+    },
   );
   void updateFunctionCount();
+  void updateImpactCount();
 }
 
 export function deactivate(): void {}

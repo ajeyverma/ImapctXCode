@@ -11,8 +11,9 @@ A starter Visual Studio Code extension.
 4. The active file's section appears second and is expanded by default. It is
    labeled with the file name followed by **(Active)**. Expand your opened
    folder to browse files; expand a file to see its functions and methods.
-   Select a function to jump to it. The left side of the status bar shows the
-   active file's function count.
+   Each function shows how many distinct files reference it; select a function
+   to jump to it. The left side of the status bar shows the active file's
+   function count and the impact count for the function under the cursor.
 5. Expand **AI Summary** and select **Generate AI Summary**. Choose an available
    language model when prompted. VS Code may ask you to grant model access.
    The summary is cleared when you switch or edit the active file.
