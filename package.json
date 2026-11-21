@@ -3,9 +3,13 @@
   "displayName": "ImpactXCode",
   "description": "A starter Visual Studio Code extension.",
   "version": "0.0.1",
-  "publisher": "impactxcode",
+  "publisher": "SubwayCoders",
   "engines": {
     "vscode": "^1.90.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ajeyverma/ImpactXCode.git"
   },
   "categories": [
     "Other"
@@ -98,5 +102,8 @@
     "@types/node": "^22.15.30",
     "@types/vscode": "^1.90.0",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@vscode/vsce": "^4.1.1"
   }
 }
