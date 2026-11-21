@@ -832,6 +832,10 @@ class ExplorerViewProvider
     }
   }
 
+  getPanelData(): { summary: string | undefined; error: string | undefined } {
+    return { summary: this.summary?.text, error: this.summaryError };
+  }
+
   private async getDirectoryChildren(uri: vscode.Uri): Promise<ExplorerItem[]> {
     try {
       const entries = await vscode.workspace.fs.readDirectory(uri);
@@ -871,8 +875,111 @@ class ExplorerViewProvider
   }
 }
 
+class ImpactPanelProvider implements vscode.WebviewViewProvider {
+  private view: vscode.WebviewView | undefined;
+
+  constructor(private readonly explorerProvider: ExplorerViewProvider) {}
+
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.view = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.onDidReceiveMessage((message: unknown) => {
+      if (typeof message === 'object' && message !== null && 'command' in message) {
+        if (message.command === 'generateSummary') {
+          void this.explorerProvider.generateAiSummary();
+        } else if (message.command === 'openFile') {
+          void vscode.commands.executeCommand('workbench.action.files.openFile');
+        }
+      }
+    });
+
+    void this.update();
+  }
+
+  async update(): Promise<void> {
+    if (!this.view) {
+      return;
+    }
+
+    const document = vscode.window.activeTextEditor?.document;
+    let summary = 'Open a file to view its summary.';
+    let graph = 'Open a file to view its call graph.';
+
+    if (document) {
+      const relativePath = vscode.workspace.asRelativePath(document.uri);
+      const text = document.getText();
+      const symbols = await vscode.commands.executeCommand<
+        (vscode.DocumentSymbol | vscode.SymbolInformation)[] | undefined
+      >('vscode.executeDocumentSymbolProvider', document.uri);
+      const functions = collectFunctionSymbols(symbols ?? [], document.uri);
+      summary = `${relativePath}\n${document.lineCount} lines · ${text.length} characters · ${functions.length} ${functions.length === 1 ? 'function' : 'functions'}`;
+
+      if (functions.length === 0) {
+        graph = 'No functions or call hierarchy entries were found in the active file.';
+      } else {
+        graph = functions
+          .map((symbol) => `• ${symbol.name}`)
+          .join('\n');
+      }
+    }
+
+    const ai = this.explorerProvider.getPanelData();
+    const aiText = ai.error ?? ai.summary ?? 'Choose Generate AI Summary from this panel.';
+
+    this.view.webview.html = this.getHtml(summary, graph, aiText);
+  }
+
+  private getHtml(summary: string, graph: string, aiSummary: string): string {
+    const escape = (value: string): string => value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    const summaryText = escape(summary).replace(/\n/g, '<br>');
+    const graphText = escape(graph).replace(/\n/g, '<br>');
+    const aiText = escape(aiSummary).replace(/\n/g, '<br>');
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body { color: var(--vscode-editor-foreground); background: var(--vscode-panel-background); font-family: var(--vscode-font-family); padding: 8px 12px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--vscode-panel-border); }
+  button.tab { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--vscode-foreground); padding: 7px 12px; cursor: pointer; }
+  button.tab.active { border-bottom-color: var(--vscode-focusBorder); color: var(--vscode-textLink-activeForeground); }
+  button.action { margin-top: 10px; padding: 6px 10px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 0; cursor: pointer; }
+  .content { display: none; padding: 10px 2px; line-height: 1.5; }
+  .content.active { display: block; }
+</style>
+</head>
+<body>
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-tab="summary" role="tab">Summary</button>
+    <button class="tab" data-tab="graph" role="tab">Graph</button>
+    <button class="tab" data-tab="ai" role="tab">AI Summary</button>
+  </div>
+  <div id="summary" class="content active">${summaryText}</div>
+  <div id="graph" class="content">${graphText}</div>
+  <div id="ai" class="content">${aiText}<br><button class="action" id="generate">Generate AI Summary</button></div>
+<script>
+  const vscode = acquireVsCodeApi();
+  document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach((item) => item.classList.remove('active'));
+    document.querySelectorAll('.content').forEach((item) => item.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.tab).classList.add('active');
+  }));
+  document.getElementById('generate').addEventListener('click', () => vscode.postMessage({ command: 'generateSummary' }));
+</script>
+</body>
+</html>`;
+  }
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   const explorerProvider = new ExplorerViewProvider(context.workspaceState);
+  const panelProvider = new ImpactPanelProvider(explorerProvider);
   const functionCountStatus = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     100,
@@ -881,6 +988,15 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.StatusBarAlignment.Left,
     90,
   );
+  const panelStatus = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    100,
+  );
+  panelStatus.name = 'ImpactXCode Editor View';
+  panelStatus.text = '$(preview) ImpactXCode';
+  panelStatus.tooltip = 'Show ImpactXCode in the editor workspace';
+  panelStatus.command = 'impactxcode.togglePanel';
+  panelStatus.show();
   let functionCountRequest = 0;
   let impactCountRequest = 0;
   let functionCountTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1037,6 +1153,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const activeEditorChanged = vscode.window.onDidChangeActiveTextEditor(() => {
     explorerProvider.resetActiveFileState();
     explorerProvider.refreshGraph();
+    void panelProvider.update();
+    void updateEditorPanel();
     void updateFunctionCount();
     void updateImpactCount();
   });
@@ -1050,14 +1168,124 @@ export function activate(context: vscode.ExtensionContext): void {
     impactCountCache.clear();
     if (event.document === vscode.window.activeTextEditor?.document) {
       explorerProvider.resetActiveFileState();
+      void panelProvider.update();
+      void updateEditorPanel();
       scheduleFunctionCountUpdate();
       scheduleImpactCountUpdate();
     }
   });
   const generateAiSummary = vscode.commands.registerCommand(
     'impactxcode.generateAiSummary',
-    () => explorerProvider.generateAiSummary(),
+    () => {
+      void explorerProvider.generateAiSummary().then(() => {
+        void panelProvider.update();
+        void updateEditorPanel();
+      });
+    },
   );
+  const panelRegistration = vscode.window.registerWebviewViewProvider(
+    'impactxcode.panel',
+    panelProvider,
+  );
+  let editorPanel: vscode.WebviewPanel | undefined;
+
+  const getEditorPanelHtml = async (): Promise<string> => {
+    const document = vscode.window.activeTextEditor?.document;
+    let summary = 'Open a file to view its summary.';
+    let graph = 'Open a file to view its graph.';
+
+    if (document) {
+      const text = document.getText();
+      const symbols = await vscode.commands.executeCommand<
+        (vscode.DocumentSymbol | vscode.SymbolInformation)[] | undefined
+      >('vscode.executeDocumentSymbolProvider', document.uri);
+      const functions = collectFunctionSymbols(symbols ?? [], document.uri);
+      summary = `${vscode.workspace.asRelativePath(document.uri)}\n${document.lineCount} lines · ${text.length} characters · ${functions.length} ${functions.length === 1 ? 'function' : 'functions'}`;
+      graph = functions.length
+        ? functions.map((symbol) => `• ${symbol.name}`).join('\n')
+        : 'No functions found in the active file.';
+    }
+
+    const ai = explorerProvider.getPanelData();
+    const aiSummary = ai.error ?? ai.summary ?? 'Choose Generate AI Summary.';
+    const escape = (value: string): string => value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body { margin: 0; height: 100vh; color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); }
+  .tabs { display: flex; height: 42px; align-items: end; gap: 4px; padding: 0 18px; border-bottom: 1px solid var(--vscode-editorWidget-border); }
+  .tab { height: 42px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--vscode-foreground); padding: 0 14px; font-size: 13px; cursor: pointer; }
+  .tab.active { border-bottom-color: var(--vscode-focusBorder); color: var(--vscode-textLink-activeForeground); }
+  .content { display: none; height: calc(100vh - 43px); box-sizing: border-box; overflow: auto; padding: 22px 28px; line-height: 1.65; white-space: pre-wrap; }
+  .content.active { display: block; }
+  .action { margin-top: 16px; padding: 7px 12px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 0; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-tab="summary" role="tab">Summary</button>
+    <button class="tab" data-tab="graph" role="tab">Graph</button>
+    <button class="tab" data-tab="ai" role="tab">AI Summary</button>
+  </div>
+  <div id="summary" class="content active">${escape(summary)}</div>
+  <div id="graph" class="content">${escape(graph)}</div>
+  <div id="ai" class="content">${escape(aiSummary)}<br><button class="action" id="generate">Generate AI Summary</button></div>
+<script>
+  const vscode = acquireVsCodeApi();
+  document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach((item) => item.classList.remove('active'));
+    document.querySelectorAll('.content').forEach((item) => item.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.tab).classList.add('active');
+  }));
+  document.getElementById('generate').addEventListener('click', () => vscode.postMessage({ command: 'generateSummary' }));
+</script>
+</body>
+</html>`;
+  };
+
+  const updateEditorPanel = async (): Promise<void> => {
+    if (!editorPanel) {
+      return;
+    }
+    editorPanel.webview.html = await getEditorPanelHtml();
+  };
+
+  const togglePanel = vscode.commands.registerCommand('impactxcode.togglePanel', async () => {
+    if (editorPanel) {
+      editorPanel.reveal(editorPanel.viewColumn);
+      await updateEditorPanel();
+      return;
+    }
+
+    const fileName = vscode.window.activeTextEditor?.document.fileName
+      .split(/[\\/]/)
+      .pop();
+    editorPanel = vscode.window.createWebviewPanel(
+      'impactxcodeEditor',
+      fileName ? `ImpactXCode: ${fileName}` : 'ImpactXCode',
+      vscode.ViewColumn.Active,
+      { enableScripts: true, retainContextWhenHidden: true },
+    );
+    editorPanel.webview.onDidReceiveMessage((message: unknown) => {
+      if (typeof message === 'object' && message !== null && 'command' in message) {
+        if (message.command === 'generateSummary') {
+          void explorerProvider.generateAiSummary().then(() => updateEditorPanel());
+        }
+      }
+    });
+    editorPanel.onDidDispose(() => {
+      editorPanel = undefined;
+    });
+    await updateEditorPanel();
+  });
   context.subscriptions.push(
     explorerProvider,
     welcomeView,
@@ -1066,8 +1294,11 @@ export function activate(context: vscode.ExtensionContext): void {
     cursorChanged,
     activeDocumentChanged,
     generateAiSummary,
+    panelRegistration,
+    togglePanel,
     functionCountStatus,
     impactCountStatus,
+    panelStatus,
     {
       dispose: () => {
         if (functionCountTimer) {

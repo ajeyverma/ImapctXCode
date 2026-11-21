@@ -12,7 +12,9 @@
   ],
   "activationEvents": [
     "onView:impactxcode.main",
-    "onCommand:impactxcode.generateAiSummary"
+    "onView:impactxcode.panel",
+    "onCommand:impactxcode.generateAiSummary",
+    "onCommand:impactxcode.togglePanel"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -20,6 +22,13 @@
       "activitybar": [
         {
           "id": "impactxcode",
+          "title": "ImpactXCode",
+          "icon": "media/impactxcode.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "impactxcodePanel",
           "title": "ImpactXCode",
           "icon": "media/impactxcode.svg"
         }
@@ -31,14 +40,41 @@
           "id": "impactxcode.main",
           "name": "Explorer"
         }
+      ],
+      "impactxcodePanel": [
+        {
+          "id": "impactxcode.panel",
+          "name": "ImpactXCode",
+          "type": "webview"
+        }
       ]
     },
     "commands": [
       {
         "command": "impactxcode.generateAiSummary",
         "title": "ImpactXCode: Generate AI Summary"
+      },
+      {
+        "command": "impactxcode.togglePanel",
+        "title": "ImpactXCode: Toggle Summary, Graph and AI Summary in Editor",
+        "icon": "$(preview)"
       }
-    ]
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "impactxcode.togglePanel",
+          "group": "navigation@10"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "impactxcode.togglePanel",
+          "when": "view == impactxcode.panel",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
