@@ -60,6 +60,18 @@
         "icon": "$(preview)"
       }
     ],
+    "customEditors": [
+      {
+        "viewType": "impactxcode.editor",
+        "displayName": "ImpactXCode",
+        "selector": [
+          {
+            "filenamePattern": "*"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
     "menus": {
       "editor/title": [
         {
